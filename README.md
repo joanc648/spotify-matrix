@@ -82,12 +82,12 @@ To verify the album art is what spins on the disk, render four local preview fra
 python spotify_matrix.py --preview-frames /tmp/spotify-matrix-preview
 ```
 
-To have it running 24/7 and booted while the Pi has power:
+### To have it running 24/7 and booted while the Pi has power:
 
-```bash
-Check if it's running: sudo systemctl status spotify-matrix
+Check if it's running: ```bash sudo systemctl status spotify-matrix```
 
-View live logs/errors: sudo journalctl -u spotify-matrix -f
+View live logs/errors: ```bash sudo journalctl -u spotify-matrix -f```
 
-Stop it: sudo systemctl stop spotify-matrix
-```
+Start it: ```bash sudo systemctl start spotify-matrix```
+
+Stop it: ```bash sudo systemctl stop spotify-matrix```
