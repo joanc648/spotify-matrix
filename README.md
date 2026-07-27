@@ -43,17 +43,19 @@ Then run the script on the Pi and open the printed authorization URL in your loc
 
 ## Run
 
-This is the working command to run the script on your raspberry pi:
+This is the working command to run the script on your raspberry pi [Changed from the original]:
 
 ```bash
-sudo -E .venv/bin/python spotify_matrix.py \
+ sudo -E .venv/bin/python spotify_matrix.py \
+  --token-cache ~/spotify_token.json \
   --rows 64 \
   --cols 64 \
   --chain-length 1 \
   --parallel 1 \
-  --gpio-slowdown 4 \
-  --no-hardware-pulse \
-  --hardware-mapping adafruit-hat
+  --gpio-slowdown 5 \
+  --hardware-mapping adafruit-hat-pwm \
+  --brightness 20 \
+  --rpm 5.0
 ```
 
 Useful hardware options:
