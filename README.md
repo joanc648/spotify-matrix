@@ -46,6 +46,9 @@ Then run the script on the Pi and open the printed authorization URL in your loc
 This is the working command to run the script on your raspberry pi [Changed from the original]:
 
 ```bash
+sudo chown jchen648:jchen648 ~/Documents/spotify-matrix/spotify_token.json
+chmod 666 ~/Documents/spotify-matrix/spotify_token.json
+
  sudo -E .venv/bin/python spotify_matrix.py \
   --token-cache ~/spotify_token.json \
   --rows 64 \
