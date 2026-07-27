@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageOps, ImageEnhance
+from PIL import Image, ImageDraw, ImageOps
 
 try:
     from dotenv import load_dotenv
@@ -396,15 +396,7 @@ def render_record(art: Image.Image | None, angle: float, size: int) -> Image.Ima
     frame = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     if art is None:
         return frame.convert("RGB")
-
-    # --- ADD THESE LINES TO FIX WASHED-OUT WHITES ---
-    contrast_enhancer = ImageEnhance.Contrast(art)
-    art = contrast_enhancer.enhance(1.3)  # Boosts contrast (1.3 is a solid sweet spot)
-
-    color_enhancer = ImageEnhance.Color(art)
-    art = color_enhancer.enhance(1.2)     # Boosts saturation slightly
-    # ------------------------------------------------
-
+        
     margin = max(2, size // 32)
     disc_size = size - margin * 2
     # The album art is the record surface: rotate it first, then cut it into a circular disk.
