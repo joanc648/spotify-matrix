@@ -7,6 +7,7 @@ from io import BytesIO
 import json
 import os
 import secrets
+import signal
 import threading
 import time
 import urllib.parse
@@ -32,6 +33,19 @@ AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
 CURRENTLY_PLAYING_URL = "https://api.spotify.com/v1/me/player/currently-playing"
 SCOPE = "user-read-currently-playing"
+
+
+class ShutdownRequested(SystemExit):
+    """Raised from a signal handler so SIGTERM/SIGINT unwind through the same
+    try/finally cleanup path (stop poll thread, clear the matrix)."""
+
+
+def _install_signal_handlers() -> None:
+    def _handler(signum, frame):  # noqa: ARG001
+        raise ShutdownRequested()
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
 
 
 @dataclass
@@ -108,7 +122,7 @@ class SpotifyClient:
         self.open_browser = open_browser
         self.token = self._load_token()
 
-    def get_currently_playing(self) -> dict[str, Any] | None:
+    def get_currently_playing(self, _retried: bool = False) -> dict[str, Any] | None:
         token = self._valid_access_token()
         response = http_request(
             "GET",
@@ -121,8 +135,12 @@ class SpotifyClient:
         if response.status == 204:
             return None
         if response.status == 401:
+            if _retried:
+                # Refreshing didn't fix it - don't recurse forever on a
+                # persistently-invalid token, let the caller's backoff handle it.
+                raise_http_error(response, "Spotify currently-playing request (post-refresh)")
             self._refresh_access_token()
-            return self.get_currently_playing()
+            return self.get_currently_playing(_retried=True)
         if response.status == 429:
             retry_after = int(response.headers.get("Retry-After", "5"))
             time.sleep(max(retry_after, 1))
@@ -396,7 +414,7 @@ def render_record(art: Image.Image | None, angle: float, size: int) -> Image.Ima
     frame = Image.new("RGBA", (size, size), (0, 0, 0, 255))
     if art is None:
         return frame.convert("RGB")
-        
+
     margin = max(2, size // 32)
     disc_size = size - margin * 2
     # The album art is the record surface: rotate it first, then cut it into a circular disk.
@@ -479,6 +497,7 @@ def poll_spotify(
     poll_seconds: float,
 ) -> None:
     last_status: str | None = None
+    consecutive_failures = 0
 
     while not stop_event.is_set():
         try:
@@ -489,7 +508,15 @@ def poll_spotify(
                 with state_lock:
                     needs_download = art.key != state.art_key or art.image_url != state.image_url
 
-                image = download_image(art.image_url) if needs_download else None
+                image = None
+                if needs_download:
+                    try:
+                        image = download_image(art.image_url)
+                    except Exception as exc:
+                        # Don't let a flaky image host block the playing-state
+                        # update - keep whatever art we already have and retry
+                        # the download again on the next poll.
+                        print(f"Album art download failed, keeping previous art: {exc}", flush=True)
 
                 with state_lock:
                     state.art_key = art.key
@@ -510,10 +537,20 @@ def poll_spotify(
             if status != last_status:
                 print(f"Spotify: {status}", flush=True)
                 last_status = status
-        except Exception as exc:
-            print(f"Spotify poll failed: {exc}", flush=True)
 
-        stop_event.wait(poll_seconds)
+            consecutive_failures = 0
+            stop_event.wait(poll_seconds)
+        except Exception as exc:
+            consecutive_failures += 1
+            # Back off on repeated failures (bad token, Spotify outage, no
+            # network after a reboot) instead of hammering the API every
+            # poll_seconds forever.
+            backoff = min(poll_seconds * (2 ** min(consecutive_failures, 5)), 60.0)
+            print(
+                f"Spotify poll failed ({consecutive_failures}x): {exc} - retrying in {backoff:.0f}s",
+                flush=True,
+            )
+            stop_event.wait(backoff)
 
 
 def run(args: argparse.Namespace) -> None:
@@ -521,6 +558,7 @@ def run(args: argparse.Namespace) -> None:
         render_preview_frames(args.preview_frames)
         return
 
+    _install_signal_handlers()
     load_dotenv()
 
     client_id = os.environ.get("SPOTIFY_CLIENT_ID")
@@ -567,7 +605,7 @@ def run(args: argparse.Namespace) -> None:
                 display.show(render_test_pattern(size, offset))
                 offset = (offset + 1) % size
                 time.sleep(1.0 / args.fps)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ShutdownRequested):
             pass
         finally:
             display.clear()
@@ -586,6 +624,8 @@ def run(args: argparse.Namespace) -> None:
 
     angle = 0.0
     last_frame = time.monotonic()
+    last_playing_at = time.monotonic()
+    asleep = False
 
     try:
         while True:
@@ -595,6 +635,29 @@ def run(args: argparse.Namespace) -> None:
                 is_playing = playback_state.is_playing
 
             now = time.monotonic()
+            if is_playing and current_art_image is not None:
+                last_playing_at = now
+
+            idle_for = now - last_playing_at
+            should_sleep = args.idle_timeout > 0 and idle_for >= args.idle_timeout
+
+            if should_sleep and not asleep:
+                asleep = True
+                display.clear()
+                print(f"No playback for {args.idle_timeout:.0f}s, blanking display.", flush=True)
+            elif not should_sleep and asleep:
+                asleep = False
+                # Reset the frame clock so we don't spin the disc through a
+                # huge angle jump representing all the time we were asleep.
+                last_frame = time.monotonic()
+                print("Playback resumed, waking display.", flush=True)
+
+            if asleep:
+                if args.once:
+                    break
+                stop_event.wait(min(1.0, 1.0 / args.fps))
+                continue
+
             delta = now - last_frame
             last_frame = now
 
@@ -609,7 +672,7 @@ def run(args: argparse.Namespace) -> None:
 
             sleep_for = max(0.0, (1.0 / args.fps) - (time.monotonic() - frame_start))
             time.sleep(sleep_for)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ShutdownRequested):
         pass
     finally:
         stop_event.set()
@@ -621,6 +684,13 @@ def positive_float(value: str) -> float:
     parsed = float(value)
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be greater than zero")
+    return parsed
+
+
+def non_negative_float(value: str) -> float:
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be zero or greater")
     return parsed
 
 
@@ -650,6 +720,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-seconds", type=positive_float, default=2.0)
     parser.add_argument("--fps", type=positive_float, default=20.0)
     parser.add_argument("--rpm", type=positive_float, default=20.0)
+    parser.add_argument(
+        "--idle-timeout",
+        type=non_negative_float,
+        default=300.0,
+        help="Seconds with nothing playing before the display blanks itself. 0 disables blanking.",
+    )
     parser.add_argument("--token-cache", type=Path, default=Path(".cache/spotify_token.json"))
     parser.add_argument("--mock-output", type=Path, help="Write the current frame PNG instead of using RGB matrix hardware.")
     parser.add_argument("--preview-frames", type=Path, help="Render sample spinning-album-art disk frames and exit.")
