@@ -723,7 +723,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--idle-timeout",
         type=non_negative_float,
-        default=300.0,
+        default=60.0,
         help="Seconds with nothing playing before the display blanks itself. 0 disables blanking.",
     )
     parser.add_argument("--token-cache", type=Path, default=Path(".cache/spotify_token.json"))
